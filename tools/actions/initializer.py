@@ -230,6 +230,34 @@ def ensure_polkit_auth(sender, conn, privilege):
     except dbus.DBusException:
         raise PermissionError("Polkit: Authentication timed out")
 
+class StdoutRedirect(logging.StreamHandler):
+    def __init__(self, pipe):
+        logging.StreamHandler.__init__(self)
+        self.pipe = pipe
+    def write(self, s):
+        self.pipe.send(s)
+    def flush(self):
+        pass
+    def emit(self, record):
+        if record.levelno >= logging.INFO:
+            self.write(self.format(record) + self.terminator)
+
+def remote_init_proc_entry(args, pipe):
+    out = StdoutRedirect(pipe)
+    sys.stdout = sys.stderr = out
+    logging.getLogger().addHandler(out)
+
+    try:
+        init(args)
+        sys.exit(0)
+    except KeyboardInterrupt:
+        sys.exit(1)
+    except Exception as e:
+        logging.exception("Exception during init")
+        sys.exit(1)
+    finally:
+        pipe.close()
+
 def remote_init_server(args, dbus_obj, params):
     args.force = True
     args.images_path = ""
@@ -239,36 +267,8 @@ def remote_init_server(args, dbus_obj, params):
     args.system_type = params["system_type"]
     args.running_init_in_service = True
 
-    class StdoutRedirect(logging.StreamHandler):
-        def __init__(self, pipe):
-            logging.StreamHandler.__init__(self)
-            self.pipe = pipe
-        def write(self, s):
-            self.pipe.send(s)
-        def flush(self):
-            pass
-        def emit(self, record):
-            if record.levelno >= logging.INFO:
-                self.write(self.format(record) + self.terminator)
-
-    def init_proc(args, pipe):
-        out = StdoutRedirect(pipe)
-        sys.stdout = sys.stderr = out
-        logging.getLogger().addHandler(out)
-
-        try:
-            init(args)
-            sys.exit(0)
-        except KeyboardInterrupt:
-            sys.exit(1)
-        except Exception as e:
-            logging.exception("Exception during init")
-            sys.exit(1)
-        finally:
-            pipe.close()
-
     parent_conn, child_conn = multiprocessing.Pipe(False)
-    p = multiprocessing.Process(target=init_proc, args=(args, child_conn,), daemon=True)
+    p = multiprocessing.Process(target=remote_init_proc_entry, args=(args, child_conn,), daemon=True)
     p.start()
 
     def monitor_init(p, pipe):
